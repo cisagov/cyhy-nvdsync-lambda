@@ -4,12 +4,14 @@
 import asyncio
 import json
 import logging
+import gzip
 import os
 from typing import List, Optional, Set, Tuple
 import urllib.parse
 import urllib.request
 from datetime import datetime
 from dateutil import tz
+from io import StringIO
 
 # Third-Party Libraries
 from beanie import Document, init_beanie
@@ -21,25 +23,89 @@ logger.setLevel(default_log_level)
 
 DEFAULT_NVD_URL = "https://nvd.nist.gov/feeds/json/cve/1.1/nvdcve-1.1-{year}.json.gz"
 NVD_FIRST_YEAR = 2002
+CVE_COLLECTION = "cves"
 
 motor_client: AsyncIOMotorClient = None
 
 
 class CVEDoc(Document):
-    """Python class that represents a cve document."""
+    __collection__ = CVE_COLLECTION
+    structure = {
+        "_id": str,  # CVE string
+        "cvss_score": float,
+        "cvss_version": str,
+        "severity": int
+    }
+    required_fields = ["_id", "cvss_score", "cvss_version", "severity"]
+    default_values = {}
 
-    id: str
-    cvss_score: float
-    cvss_version: str
-    severity: int
+    def save(self, *args, **kwargs):
+        # Calculate severity from cvss on save
+        # Source: https://nvd.nist.gov/vuln-metrics/cvss
+        #
+        # Notes:
+        # - The CVSS score to severity mapping is not continuous (e.g. a
+        #   score of 8.95 is undefined according to their table).  However,
+        #   the CVSS equation documentation
+        #   (https://www.first.org/cvss/specification-document#CVSS-v3-1-Equations)
+        #   specifies that all CVSS scores are rounded up to the nearest tenth
+        #   of a point, so our severity mapping below is valid.
+        # - CVSSv3 specifies that a score of 0.0 has a severity of "None", but
+        #   we have chosen to map 0.0 to severity 1 ("Low") because CyHy code
+        #   has historically assumed severities between 1 and 4 (inclusive).
+        #   Since we have not seen CVSSv3 scores lower than 3.1, this will
+        #   hopefully never be an issue.
+        cvss = self["cvss_score"]
+        if self["cvss_version"] == "2.0":
+            if cvss == 10:
+                self["severity"] = 4
+            elif cvss >= 7.0:
+                self["severity"] = 3
+            elif cvss >= 4.0:
+                self["severity"] = 2
+            else:
+                self["severity"] = 1
+        elif self["cvss_version"] in ["3.0", "3.1"]:
+            if cvss >= 9.0:
+                self["severity"] = 4
+            elif cvss >= 7.0:
+                self["severity"] = 3
+            elif cvss >= 4.0:
+                self["severity"] = 2
+            else:
+                self["severity"] = 1
+        super(CVEDoc, self).save(*args, **kwargs)
 
-    class Settings:
-        """Optional settings."""
+# async def parse_json(json_stream, db):
+#     """Process the provided CVEs JSONs and update the database with its contents."""
+#     await init_beanie(database=motor_client[db], document_models=[CVEDoc])
 
-        # Default collection to use
-        name = "cves"
-        validate_on_save = True
-        
+#     data = json.load(json_stream)
+       
+#     if data.get("CVE_data_type") != "CVE":
+#         raise ValueError("JSON does not look like valid NVD CVE data.")
+
+#     for entry in data.get("CVE_Items", []):
+#         cve_id = entry["cve"]["CVE_data_meta"]["ID"]
+#         # Reject CVEs that don't have baseMetricV2 or baseMetricV3 CVSS data
+#         if not any(k in entry["impact"] for k in ["baseMetricV2", "baseMetricV3"]):
+#             # Make sure they are removed from our db.
+#             CVEDoc.collection.remove({"_id": cve_id}, raw_result=True)
+#             print("x", end="")
+#         else:
+#             print(".", end="")
+#             version = "V3" if "baseMetricV3" in entry["impact"] else "V2"
+#             cvss_base_score = entry["impact"]["baseMetric" + version]["cvss" + version]["baseScore"]
+#             cvss_version = entry["impact"]["baseMetric" + version]["cvss" + version]["version"]
+#             entry_doc = CVEDoc({
+#                 "_id": cve_id,
+#                 "cvss_score": float(cvss_base_score),
+#                 "cvss_version": cvss_version
+#             })
+#             entry_doc.save()
+#     print("\n\n")
+
+
 async def process_cve(cve) -> str:
     """Add the provided CVE to the database and return its id."""
     cve_id = cve.get("cveID")
@@ -49,18 +115,9 @@ async def process_cve(cve) -> str:
     cve_doc = CVEDoc(id=cve_id)
     await cve_doc.save()
     return cve_doc.id
-
-def utcnow():
-    """Returns a timezone-aware datetime object with the current time in UTC."""
-    return datetime.now(tz.tzutc())
-
-def generate_urls():
-    """Returns the NVD URLs for each year."""
-    current_year = utcnow().year
-    years = range(NVD_FIRST_YEAR, current_year + 1)
-    return [DEFAULT_NVD_URL.format(**{"year": year}) for year in years]
-
-async def process_cve_json(json_urls, target_db) -> None:
+            
+            
+async def parse_cve_json(json_urls, target_db) -> None:
     """Process the provided CVEs JSONs and update the database with its contents."""
     await init_beanie(database=motor_client[target_db], document_models=[CVEDoc])
     
@@ -84,6 +141,19 @@ async def process_cve_json(json_urls, target_db) -> None:
             for task in asyncio.as_completed(tasks):
                 nvd_cve = await task
                 imported_cves.add(nvd_cve)
+                
+async def process_url(url, db):
+    socket = urllib.request.urlopen(url)
+    buf = StringIO(socket.read().decode('utf-8'))
+    f = gzip.GzipFile(fileobj=buf)
+    await parse_cve_json(f, db)
+
+
+def generate_urls():
+    """Returns the NVD URLs for each year."""
+    current_year = datetime.utcnow().year
+    years = list(range(NVD_FIRST_YEAR, current_year + 1))
+    return [DEFAULT_NVD_URL.format(**{"year": year}) for year in years]
 
 
 
@@ -149,9 +219,13 @@ def handler(event, context) -> None:
 
     # Determine if a non-default CVEs JSON URL is being used
     nvd_urls = generate_urls()
-    for nvd_url in nvd_urls:
-        cve_json_url = os.environ.get("json_url", nvd_url)
-
+    
+    json_url = os.environ.get("json_url")
+    if json_url is None:
+        cve_json_urls = nvd_urls
+    else:
+        cve_json_urls = [json_url]
+        
     # Determine if a non-default collection is being used
     db_collection = os.environ.get("target_collection")
     if db_collection is not None:
@@ -167,10 +241,11 @@ def handler(event, context) -> None:
         motor_client = AsyncIOMotorClient(mongodb_uri)
 
     try:
-        asyncio.run(process_cve_json(cve_json_url, write_db))
+        for cve_urls in cve_json_urls:
+         asyncio.run(process_url(cve_urls, write_db))
     except Exception as err:
         logging.error(
-            "Problem encountered while processing the CVEs JSON at %s", cve_json_url
+            "Problem encountered while processing the CVEs JSON at %s", cve_json_urls
         )
         logging.exception(err)  
 
