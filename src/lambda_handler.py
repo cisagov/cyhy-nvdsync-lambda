@@ -11,7 +11,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime
 from dateutil import tz
-from io import StringIO
+from io import StringIO, BytesIO
 
 # Third-Party Libraries
 from beanie import Document, init_beanie
@@ -74,77 +74,50 @@ class CVEDoc(Document):
                 self["severity"] = 2
             else:
                 self["severity"] = 1
-        super(CVEDoc, self).save(*args, **kwargs)
+        super().save(*args, **kwargs)
 
-# async def parse_json(json_stream, db):
-#     """Process the provided CVEs JSONs and update the database with its contents."""
-#     await init_beanie(database=motor_client[db], document_models=[CVEDoc])
-
-#     data = json.load(json_stream)
-       
-#     if data.get("CVE_data_type") != "CVE":
-#         raise ValueError("JSON does not look like valid NVD CVE data.")
-
-#     for entry in data.get("CVE_Items", []):
-#         cve_id = entry["cve"]["CVE_data_meta"]["ID"]
-#         # Reject CVEs that don't have baseMetricV2 or baseMetricV3 CVSS data
-#         if not any(k in entry["impact"] for k in ["baseMetricV2", "baseMetricV3"]):
-#             # Make sure they are removed from our db.
-#             CVEDoc.collection.remove({"_id": cve_id}, raw_result=True)
-#             print("x", end="")
-#         else:
-#             print(".", end="")
-#             version = "V3" if "baseMetricV3" in entry["impact"] else "V2"
-#             cvss_base_score = entry["impact"]["baseMetric" + version]["cvss" + version]["baseScore"]
-#             cvss_version = entry["impact"]["baseMetric" + version]["cvss" + version]["version"]
-#             entry_doc = CVEDoc({
-#                 "_id": cve_id,
-#                 "cvss_score": float(cvss_base_score),
-#                 "cvss_version": cvss_version
-#             })
-#             entry_doc.save()
-#     print("\n\n")
-
-
-async def process_cve(cve) -> str:
+def process_cve(cve) -> str:
     """Add the provided CVE to the database and return its id."""
     cve_id = cve.get("cveID")
     if not cve_id:
         raise ValueError("JSON does not look like valid CISA CVE data.")
 
     cve_doc = CVEDoc(id=cve_id)
-    await cve_doc.save()
+    cve_doc.save()
     return cve_doc.id
             
             
-async def parse_cve_json(json_urls, target_db) -> None:
+async def parse_cve_json(json_stream, target_db) -> None:
     """Process the provided CVEs JSONs and update the database with its contents."""
     await init_beanie(database=motor_client[target_db], document_models=[CVEDoc])
-    
-    imported_cves = set()
+    data = json.load(json_stream)
 
-    # We disable the bandit blacklist for the urllib.request.urlopen() function
-    # because the URL is either the defaul (safe) URL or one provided in the
-    # Lambda configuration so we can assume it is safe.
-    for json_url in json_urls:
-        
-        with urllib.request.urlopen(json_url) as response:  # nosec B310
-            if response.status != 200:
-                raise Exception("Failed to retrieve CISA CVE JSON.")
+    if data.get("CVE_data_type") != "CVE":
+        raise ValueError("JSON does not look like valid NVD CVE data.")
 
-            nvd_json = json.loads(response.read().decode("utf-8"))
-
-            tasks = [
-                asyncio.create_task(process_cve(cve)) for cve in nvd_json["vulnerabilities"]
-            ]
-
-            for task in asyncio.as_completed(tasks):
-                nvd_cve = await task
-                imported_cves.add(nvd_cve)
+    for entry in data.get("CVE_Items", []):
+        cve_id = entry["cve"]["CVE_data_meta"]["ID"]
+        # Reject CVEs that don't have baseMetricV2 or baseMetricV3 CVSS data
+        if not any(k in entry["impact"] for k in ["baseMetricV2", "baseMetricV3"]):
+            # Make sure they are removed from our db.
+            CVEDoc.collection.remove({"_id": cve_id}, safe=False)
+            print("x", end="")
+        else:
+            print(".", end="")
+            version = "V3" if "baseMetricV3" in entry["impact"] else "V2"
+            cvss_base_score = entry["impact"]["baseMetric" + version]["cvss" + version]["baseScore"]
+            cvss_version = entry["impact"]["baseMetric" + version]["cvss" + version]["version"]
+            entry_doc = CVEDoc({
+                "_id": cve_id,
+                "cvss_score": float(cvss_base_score),
+                "cvss_version": cvss_version
+            })
+            entry_doc.save(safe=False)
+    print("\n\n")
                 
-async def process_url(url, db):
+async def process_url(url, db) -> None:
     socket = urllib.request.urlopen(url)
-    buf = StringIO(socket.read().decode('utf-8'))
+    buf = BytesIO(socket.read())
     f = gzip.GzipFile(fileobj=buf)
     await parse_cve_json(f, db)
 
@@ -154,7 +127,6 @@ def generate_urls():
     current_year = datetime.utcnow().year
     years = list(range(NVD_FIRST_YEAR, current_year + 1))
     return [DEFAULT_NVD_URL.format(**{"year": year}) for year in years]
-
 
 
 def handler(event, context) -> None:
@@ -198,23 +170,7 @@ def handler(event, context) -> None:
         logging.error("Invalid invocation event.")
         return
 
-    # Build a list of tuples to validate and create the MongoDB URI
-    # for var in [
-    #     "db_user",
-    #     "db_pass",
-    #     "db_host",
-    #     "db_port",
-    #     "db_authdb",
-    # ]:
-    #     mongodb_uri_elements.append((var, os.environ.get(var)))
-
-    # Check that we have all of the required variables
-    # if missing_variables := [k for k, v in mongodb_uri_elements if v is None]:
-    #     logging.error("Missing required variables: %s", ",".join(missing_variables))
-    #     return
-
     # Determine the database where the CVE data will be inserted
-    # write_db = os.environ.get("db_writedb", "db_authdb")
     write_db = "cyhy"
 
     # Determine if a non-default CVEs JSON URL is being used
@@ -242,7 +198,7 @@ def handler(event, context) -> None:
 
     try:
         for cve_urls in cve_json_urls:
-         asyncio.run(process_url(cve_urls, write_db))
+            asyncio.run(process_url(cve_urls, write_db))
     except Exception as err:
         logging.error(
             "Problem encountered while processing the CVEs JSON at %s", cve_json_urls
