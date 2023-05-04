@@ -10,7 +10,6 @@ from typing import List, Optional, Set, Tuple
 import urllib.parse
 import urllib.request
 from datetime import datetime
-from dateutil import tz
 from io import StringIO, BytesIO
 
 # Third-Party Libraries
@@ -23,21 +22,23 @@ logger.setLevel(default_log_level)
 
 DEFAULT_NVD_URL = "https://nvd.nist.gov/feeds/json/cve/1.1/nvdcve-1.1-{year}.json.gz"
 NVD_FIRST_YEAR = 2002
-CVE_COLLECTION = "cves"
+DEFAULT_NVD_COLLECTION = "cves"
 
 motor_client: AsyncIOMotorClient = None
 
 
 class CVEDoc(Document):
-    __collection__ = CVE_COLLECTION
-    structure = {
-        "_id": str,  # CVE string
-        "cvss_score": float,
-        "cvss_version": str,
-        "severity": int
-    }
-    required_fields = ["_id", "cvss_score", "cvss_version", "severity"]
-    default_values = {}
+    
+    id: str # CVE string
+    # cvss_score: float
+    # cvss_version: str
+    # severity: int
+    
+    class Settings:
+        """Optional settings."""
+
+        name = DEFAULT_NVD_COLLECTION
+        validate_on_save = True
 
     def save(self, *args, **kwargs):
         # Calculate severity from cvss on save
@@ -55,35 +56,35 @@ class CVEDoc(Document):
         #   has historically assumed severities between 1 and 4 (inclusive).
         #   Since we have not seen CVSSv3 scores lower than 3.1, this will
         #   hopefully never be an issue.
-        cvss = self["cvss_score"]
-        if self["cvss_version"] == "2.0":
-            if cvss == 10:
-                self["severity"] = 4
-            elif cvss >= 7.0:
-                self["severity"] = 3
-            elif cvss >= 4.0:
-                self["severity"] = 2
-            else:
-                self["severity"] = 1
-        elif self["cvss_version"] in ["3.0", "3.1"]:
-            if cvss >= 9.0:
-                self["severity"] = 4
-            elif cvss >= 7.0:
-                self["severity"] = 3
-            elif cvss >= 4.0:
-                self["severity"] = 2
-            else:
-                self["severity"] = 1
+        # cvss = self.cvss_score
+        # if self.cvss_version == "2.0":
+        #     if cvss == 10:
+        #         self.severity = 4
+        #     elif cvss >= 7.0:
+        #         self.severity= 3
+        #     elif cvss >= 4.0:
+        #         self.severity = 2
+        #     else:
+        #         self.severity = 1
+        # elif self.cvss_version in ["3.0", "3.1"]:
+        #     if cvss >= 9.0:
+        #         self.severity = 4
+        #     elif cvss >= 7.0:
+        #         self.severity = 3
+        #     elif cvss >= 4.0:
+        #         self.severity = 2
+        #     else:
+        #         self.severity = 1
         super().save(*args, **kwargs)
 
-def process_cve(cve) -> str:
+async def process_cve(cve) -> str:
     """Add the provided CVE to the database and return its id."""
     cve_id = cve.get("cveID")
     if not cve_id:
         raise ValueError("JSON does not look like valid CISA CVE data.")
 
     cve_doc = CVEDoc(id=cve_id)
-    cve_doc.save()
+    await cve_doc.save()
     return cve_doc.id
             
             
@@ -91,6 +92,7 @@ async def parse_cve_json(json_stream, target_db) -> None:
     """Process the provided CVEs JSONs and update the database with its contents."""
     await init_beanie(database=motor_client[target_db], document_models=[CVEDoc])
     data = json.load(json_stream)
+    imported_cves = set()
 
     if data.get("CVE_data_type") != "CVE":
         raise ValueError("JSON does not look like valid NVD CVE data.")
@@ -100,19 +102,27 @@ async def parse_cve_json(json_stream, target_db) -> None:
         # Reject CVEs that don't have baseMetricV2 or baseMetricV3 CVSS data
         if not any(k in entry["impact"] for k in ["baseMetricV2", "baseMetricV3"]):
             # Make sure they are removed from our db.
-            CVEDoc.collection.remove({"_id": cve_id}, safe=False)
+            rejectDoc = CVEDoc(id = cve_id)
+            await rejectDoc.delete()
             print("x", end="")
         else:
             print(".", end="")
-            version = "V3" if "baseMetricV3" in entry["impact"] else "V2"
-            cvss_base_score = entry["impact"]["baseMetric" + version]["cvss" + version]["baseScore"]
-            cvss_version = entry["impact"]["baseMetric" + version]["cvss" + version]["version"]
-            entry_doc = CVEDoc({
-                "_id": cve_id,
-                "cvss_score": float(cvss_base_score),
-                "cvss_version": cvss_version
-            })
-            entry_doc.save(safe=False)
+            # version = "V3" if "baseMetricV3" in entry["impact"] else "V2"
+            # cvss_base_score = entry["impact"]["baseMetric" + version]["cvss" + version]["baseScore"]
+            # cvss_version_temp = entry["impact"]["baseMetric" + version]["cvss" + version]["version"]
+            entry_doc = CVEDoc(
+                id = cve_id
+                # cvss_score = float(cvss_base_score),
+                # cvss_version = cvss_version_temp
+            )
+            tasks = [
+                asyncio.create_task(process_cve(entry))
+            ]
+            
+    for task in asyncio.as_completed(tasks):
+        nvd_cves = await task
+        imported_cves.add(nvd_cves)
+        
     print("\n\n")
                 
 async def process_url(url, db) -> None:
