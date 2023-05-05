@@ -30,9 +30,9 @@ motor_client: AsyncIOMotorClient = None
 class CVEDoc(Document):
     
     id: str # CVE string
-    # cvss_score: float
-    # cvss_version: str
-    # severity: int
+    cvss_score: float
+    cvss_version: str
+    severity: int
     
     class Settings:
         """Optional settings."""
@@ -56,25 +56,25 @@ class CVEDoc(Document):
         #   has historically assumed severities between 1 and 4 (inclusive).
         #   Since we have not seen CVSSv3 scores lower than 3.1, this will
         #   hopefully never be an issue.
-        # cvss = self.cvss_score
-        # if self.cvss_version == "2.0":
-        #     if cvss == 10:
-        #         self.severity = 4
-        #     elif cvss >= 7.0:
-        #         self.severity= 3
-        #     elif cvss >= 4.0:
-        #         self.severity = 2
-        #     else:
-        #         self.severity = 1
-        # elif self.cvss_version in ["3.0", "3.1"]:
-        #     if cvss >= 9.0:
-        #         self.severity = 4
-        #     elif cvss >= 7.0:
-        #         self.severity = 3
-        #     elif cvss >= 4.0:
-        #         self.severity = 2
-        #     else:
-        #         self.severity = 1
+        cvss = self.cvss_score
+        if self.cvss_version == "2.0":
+            if cvss == 10:
+                self.severity = 4
+            elif cvss >= 7.0:
+                self.severity= 3
+            elif cvss >= 4.0:
+                self.severity = 2
+            else:
+                self.severity = 1
+        elif self.cvss_version in ["3.0", "3.1"]:
+            if cvss >= 9.0:
+                self.severity = 4
+            elif cvss >= 7.0:
+                self.severity = 3
+            elif cvss >= 4.0:
+                self.severity = 2
+            else:
+                self.severity = 1
         super().save(*args, **kwargs)
 
 async def process_cve(cve) -> str:
@@ -102,21 +102,21 @@ async def parse_cve_json(json_stream, target_db) -> None:
         # Reject CVEs that don't have baseMetricV2 or baseMetricV3 CVSS data
         if not any(k in entry["impact"] for k in ["baseMetricV2", "baseMetricV3"]):
             # Make sure they are removed from our db.
-            rejectDoc = CVEDoc(id = cve_id)
+            rejectDoc = await CVEDoc.find_one(CVEDoc.id == cve_id)
             await rejectDoc.delete()
             print("x", end="")
         else:
             print(".", end="")
-            # version = "V3" if "baseMetricV3" in entry["impact"] else "V2"
-            # cvss_base_score = entry["impact"]["baseMetric" + version]["cvss" + version]["baseScore"]
-            # cvss_version_temp = entry["impact"]["baseMetric" + version]["cvss" + version]["version"]
+            version = "V3" if "baseMetricV3" in entry["impact"] else "V2"
+            cvss_base_score = entry["impact"]["baseMetric" + version]["cvss" + version]["baseScore"]
+            cvss_version_temp = entry["impact"]["baseMetric" + version]["cvss" + version]["version"]
             entry_doc = CVEDoc(
-                id = cve_id
-                # cvss_score = float(cvss_base_score),
-                # cvss_version = cvss_version_temp
+                id = cve_id,
+                cvss_score = float(cvss_base_score),
+                cvss_version = cvss_version_temp
             )
             tasks = [
-                asyncio.create_task(process_cve(entry))
+                asyncio.create_task(process_cve(entry_doc))
             ]
             
     for task in asyncio.as_completed(tasks):
