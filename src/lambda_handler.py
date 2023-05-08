@@ -32,63 +32,48 @@ class CVEDoc(Document):
     id: str # CVE string
     cvss_score: float
     cvss_version: str
-    severity: int
+    severity: Optional [int]
     
     class Settings:
         """Optional settings."""
-
-        name = DEFAULT_NVD_COLLECTION
+        
         validate_on_save = True
-
-    def save(self, *args, **kwargs):
-        # Calculate severity from cvss on save
-        # Source: https://nvd.nist.gov/vuln-metrics/cvss
-        #
-        # Notes:
-        # - The CVSS score to severity mapping is not continuous (e.g. a
-        #   score of 8.95 is undefined according to their table).  However,
-        #   the CVSS equation documentation
-        #   (https://www.first.org/cvss/specification-document#CVSS-v3-1-Equations)
-        #   specifies that all CVSS scores are rounded up to the nearest tenth
-        #   of a point, so our severity mapping below is valid.
-        # - CVSSv3 specifies that a score of 0.0 has a severity of "None", but
-        #   we have chosen to map 0.0 to severity 1 ("Low") because CyHy code
-        #   has historically assumed severities between 1 and 4 (inclusive).
-        #   Since we have not seen CVSSv3 scores lower than 3.1, this will
-        #   hopefully never be an issue.
-        cvss = self.cvss_score
+        
+    def calculate_severity(self):
         if self.cvss_version == "2.0":
-            if cvss == 10:
+            if self.cvss_score == 10:
                 self.severity = 4
-            elif cvss >= 7.0:
-                self.severity= 3
-            elif cvss >= 4.0:
+            elif self.cvss_score >= 7.0:
+                self.severity = 3
+            elif self.cvss_score >= 4.0:
                 self.severity = 2
             else:
                 self.severity = 1
         elif self.cvss_version in ["3.0", "3.1"]:
-            if cvss >= 9.0:
+            if self.cvss_score >= 9.0:
                 self.severity = 4
-            elif cvss >= 7.0:
+            elif self.cvss_score >= 7.0:
                 self.severity = 3
-            elif cvss >= 4.0:
+            elif self.cvss_score >= 4.0:
                 self.severity = 2
             else:
                 self.severity = 1
-        super().save(*args, **kwargs)
 
-async def process_cve(cve) -> str:
+async def process_nvd(cve) -> str:
     """Add the provided CVE to the database and return its id."""
     cve_id = cve.get("cveID")
+    
+    
     if not cve_id:
         raise ValueError("JSON does not look like valid CISA CVE data.")
 
     cve_doc = CVEDoc(id=cve_id)
     await cve_doc.save()
     return cve_doc.id
+
             
             
-async def parse_cve_json(json_stream, target_db) -> None:
+async def process_cve_json(json_stream, target_db) -> None:
     """Process the provided CVEs JSONs and update the database with its contents."""
     await init_beanie(database=motor_client[target_db], document_models=[CVEDoc])
     data = json.load(json_stream)
@@ -98,25 +83,49 @@ async def parse_cve_json(json_stream, target_db) -> None:
         raise ValueError("JSON does not look like valid NVD CVE data.")
 
     for entry in data.get("CVE_Items", []):
+        # Fill fields for the CVE Documents from the given JSON files
         cve_id = entry["cve"]["CVE_data_meta"]["ID"]
+        print(cve_id)
+        version = "V3" if "baseMetricV3" in entry["impact"] else "V2"
+        print(version)
+        cvss_base_score = entry["impact"]["baseMetric" + version]["cvss" + version]["baseScore"]
+        print(cvss_base_score)
+        cvss_version_temp = entry["impact"]["baseMetric" + version]["cvss" + version]["version"]
+        cve_doc_temp = CVEDoc(
+                id=cve_id,
+                cvss_score=cvss_base_score,
+                cvss_version=cvss_version_temp
+            )
+            
+        cve_doc_temp.calculate_severity()
+            
         # Reject CVEs that don't have baseMetricV2 or baseMetricV3 CVSS data
         if not any(k in entry["impact"] for k in ["baseMetricV2", "baseMetricV3"]):
-            # Make sure they are removed from our db.
-            rejectDoc = await CVEDoc.find_one(CVEDoc.id == cve_id)
-            await rejectDoc.delete()
+            
+             # Make sure they are removed from our db.
+            unscored_cve_doc = await CVEDoc.find_one(
+                CVEDoc.id == cve_id,
+                CVEDoc.cvss_score == float(cvss_base_score),
+                CVEDoc.cvss_version == cvss_version_temp,
+                CVEDoc.severity == cve_doc_temp.severity
+            )
+            
+            await unscored_cve_doc.delete()
             print("x", end="")
         else:
+            # Fill document fields with CVE data
             print(".", end="")
-            version = "V3" if "baseMetricV3" in entry["impact"] else "V2"
-            cvss_base_score = entry["impact"]["baseMetric" + version]["cvss" + version]["baseScore"]
-            cvss_version_temp = entry["impact"]["baseMetric" + version]["cvss" + version]["version"]
+   
             entry_doc = CVEDoc(
                 id = cve_id,
                 cvss_score = float(cvss_base_score),
-                cvss_version = cvss_version_temp
+                cvss_version = cvss_version_temp,
+                severity = cve_doc_temp.severity
             )
-            tasks = [
-                asyncio.create_task(process_cve(entry_doc))
+            
+        
+        tasks = [
+            asyncio.create_task((process_nvd(entry_doc)))
             ]
             
     for task in asyncio.as_completed(tasks):
@@ -124,13 +133,14 @@ async def parse_cve_json(json_stream, target_db) -> None:
         imported_cves.add(nvd_cves)
         
     print("\n\n")
-                
+    
+    
 async def process_url(url, db) -> None:
     socket = urllib.request.urlopen(url)
     buf = BytesIO(socket.read())
     f = gzip.GzipFile(fileobj=buf)
-    await parse_cve_json(f, db)
-
+    await process_cve_json(f, db)
+    
 
 def generate_urls():
     """Returns the NVD URLs for each year."""
@@ -211,7 +221,7 @@ def handler(event, context) -> None:
             asyncio.run(process_url(cve_urls, write_db))
     except Exception as err:
         logging.error(
-            "Problem encountered while processing the CVEs JSON at %s", cve_json_urls
+            "Problem encountered while processing the CVEs JSON at %s", cve_urls
         )
         logging.exception(err)  
 
