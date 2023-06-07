@@ -39,7 +39,7 @@ class CVEDoc(Document):
         
         validate_on_save = True
         
-    def calculate_severity(self):
+    async def save(self, *args, **kwargs):
         if self.cvss_version == "2.0":
             if self.cvss_score == 10:
                 self.severity = 4
@@ -58,24 +58,59 @@ class CVEDoc(Document):
                 self.severity = 2
             else:
                 self.severity = 1
+        await super(CVEDoc, self).save(*args, **kwargs)        
 
 async def process_nvd(cve) -> str:
     """Add the provided CVE to the database and return its id."""
-    store_cve_id = cve.id
-    store_cvss_version = cve.cvss_version
-    store_cvss_score = cve.cvss_score
-    store_severity = cve.severity
     
-    if not store_cve_id:
-        raise ValueError("JSON does not look like valid CISA CVE data.")
+     # Fill fields for the CVE Documents from the given JSON files
+    cve_id = cve["cve"]["CVE_data_meta"]["ID"]
+         # Reject CVEs that don't have baseMetricV2 or baseMetricV3 CVSS data
+    if not any(k in cve["impact"] for k in ["baseMetricV2", "baseMetricV3"]):
+            
+            # Make sure they are removed from our db.
+        rejected_cve_doc = CVEDoc.find_one(
+            CVEDoc.id == cve_id
+        )
+        
+        await rejected_cve_doc.delete()
+        print("x", end="")
+    else:
+        print("The cvss_id is = " +cve_id)
+        version = "V3" if "baseMetricV3" in cve["impact"] else "V2"
+        print("The version is = " + version)
+        cvss_base_score = cve["impact"]["baseMetric" + version]["cvss" + version]["baseScore"]
+        print("The cvss_base score is " + str(cvss_base_score))
+        cvss_version_temp = cve["impact"]["baseMetric" + version]["cvss" + version]["version"]
+    
+        # Fill document fields with CVE data
+        print(".", end="")
 
-    cve_doc = CVEDoc(id=store_cve_id,
-                     cvss_score = float(store_cvss_score),
-                     cvss_version = store_cvss_version,
-                     severity = store_severity
-                     )
-    await cve_doc.save()
-    return cve_doc.id
+        cve_doc = CVEDoc(
+            id = cve_id,
+            cvss_score = float(cvss_base_score),
+            cvss_version = cvss_version_temp
+        )
+        
+        if not cve_id:
+            raise ValueError("JSON does not look like valid CISA CVE data.")
+        
+        await cve_doc.save()
+        return cve_doc.id
+    
+    # store_cve_id = cve.id
+    # store_cvss_version = cve.cvss_version
+    # store_cvss_score = cve.cvss_score
+    
+    # if not cve_id:
+    #     raise ValueError("JSON does not look like valid CISA CVE data.")
+
+    # cve_doc = CVEDoc(id=store_cve_id,
+    #                  cvss_score = float(store_cvss_score),
+    #                  cvss_version = store_cvss_version
+    #                  )
+    # cve_doc.save()
+    # return cve_doc.id
 
             
             
@@ -88,54 +123,47 @@ async def process_cve_json(json_stream, target_db) -> None:
     if data.get("CVE_data_type") != "CVE":
         raise ValueError("JSON does not look like valid NVD CVE data.")
 
-    for entry in data.get("CVE_Items", []):
-        # Fill fields for the CVE Documents from the given JSON files
-        cve_id = entry["cve"]["CVE_data_meta"]["ID"]
-         # Reject CVEs that don't have baseMetricV2 or baseMetricV3 CVSS data
-        if not any(k in entry["impact"] for k in ["baseMetricV2", "baseMetricV3"]):
+    # for cve in data.get("CVE_Items", []):
+    #     # Fill fields for the CVE Documents from the given JSON files
+    #     cve_id = cve["cve"]["CVE_data_meta"]["ID"]
+    #      # Reject CVEs that don't have baseMetricV2 or baseMetricV3 CVSS data
+    #     if not any(k in cve["impact"] for k in ["baseMetricV2", "baseMetricV3"]):
             
-             # Make sure they are removed from our db.
-            rejected_cve_doc = CVEDoc.find_one(
-                CVEDoc.id == cve_id
-            )
+    #          # Make sure they are removed from our db.
+    #         rejected_cve_doc = CVEDoc.find_one(
+    #             CVEDoc.id == cve_id
+    #         )
             
-            rejected_cve_doc.delete()
-            print("x", end="")
-        else:
-            print("The cvss_id is = " +cve_id)
-            version = "V3" if "baseMetricV3" in entry["impact"] else "V2"
-            print("The version is = " + version)
-            cvss_base_score = entry["impact"]["baseMetric" + version]["cvss" + version]["baseScore"]
-            print("The cvss_base score is " + str(cvss_base_score))
-            cvss_version_temp = entry["impact"]["baseMetric" + version]["cvss" + version]["version"]
-            cve_doc_temp = CVEDoc(
-                    id=cve_id,
-                    cvss_score=float(cvss_base_score),
-                    cvss_version=cvss_version_temp
-                )
-                
-            cve_doc_temp.calculate_severity()
-            
-            print("Severity is = " + str(cve_doc_temp.severity))
+    #         rejected_cve_doc.delete()
+    #         print("x", end="")
+    #     else:
+    #         print("The cvss_id is = " +cve_id)
+    #         version = "V3" if "baseMetricV3" in cve["impact"] else "V2"
+    #         print("The version is = " + version)
+    #         cvss_base_score = cve["impact"]["baseMetric" + version]["cvss" + version]["baseScore"]
+    #         print("The cvss_base score is " + str(cvss_base_score))
+    #         cvss_version_temp = cve["impact"]["baseMetric" + version]["cvss" + version]["version"]
         
-            # Fill document fields with CVE data
-            print(".", end="")
+    #         # Fill document fields with CVE data
+    #         print(".", end="")
    
-            entry_doc = CVEDoc(
-                id = cve_id,
-                cvss_score = float(cvss_base_score),
-                cvss_version = cvss_version_temp,
-                severity = cve_doc_temp.severity
-            )
+    #         cve_doc = CVEDoc(
+    #             id = cve_id,
+    #             cvss_score = float(cvss_base_score),
+    #             cvss_version = cvss_version_temp
+    #         )
             
         
-        tasks = [
-            asyncio.create_task((process_nvd(entry_doc)))
+        # tasks = [
+        #     asyncio.create_task((process_nvd(cve_doc)))
+        #     ]
+    tasks = [
+        asyncio.create_task(process_nvd(cve)) for cve in data.get("CVE_Items", [])
             ]
             
-        for task in asyncio.as_completed(tasks):
-            nvd_cves = await task
-            imported_cves.add(nvd_cves)
+    for task in asyncio.as_completed(tasks):
+        nvd_cves = await task
+        imported_cves.add(nvd_cves)
         
     print("\n\n")
     
