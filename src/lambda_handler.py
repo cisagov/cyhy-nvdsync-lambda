@@ -44,18 +44,7 @@ class CVEDoc(Document):
     async def save(self, *args, **kwargs):
         """Save the document to the database."""
         # Calculate severity based on CVSS version and score.
-        # Severity is based on the CVSS v2.0 or v3.0 score.
-        # Severity is calculated as follows:
-        # Severity = 4 if CVSS v2.0 score = 10
-        # Severity = 3 if CVSS v2.0 score >= 7.0
-        # Severity = 2 if CVSS v2.0 score >= 4.0
-        # Severity = 1 if CVSS v2.0 score < 4.0
-        # Severity = 4 if CVSS v3.0 score >= 9.0
-        # Severity = 3 if CVSS v3.0 score >= 7.0
-        # Severity = 2 if CVSS v3.0 score >= 4.0
-        # Severity = 1 if CVSS v3.0 score < 4.0
-        # Severity = 4 if CVSS v3.1 score >= 9.0
-        # Severity = 3 if CVSS v3.1 score >= 7.0"""
+
         if self.cvss_version == "2.0":
             if self.cvss_score == 10:
                 self.severity = 4
@@ -81,21 +70,25 @@ async def process_nvd(cve) -> str:
     """Add the provided CVE to the database and return its id."""
     # Fill fields for the CVE Documents from the given JSON files
     cve_id = cve["cve"]["CVE_data_meta"]["ID"]
-    # Reject CVEs that don't have baseMetricV2 or baseMetricV3 CVSS data
+    # Reject or remove CVEs that don't have baseMetricV2 or baseMetricV3 CVSS data
     if not any(k in cve["impact"] for k in ["baseMetricV2", "baseMetricV3"]):
-        """If the CVE does not have baseMetricV2 or baseMetricV3 CVSS data,
-        then if it exists in the database, it needs to be deleted from the database.
-        Otherwise return the CVE_id"""
-        if await CVEDoc.find_one({"id": cve_id}):
-            await CVEDoc.delete({"id": cve_id})
+        """If the CVE is in the database, it needs to be deleted from the database"""
+
+        if await CVEDoc.find_one(CVEDoc.id == cve_id):
             print(
                 "The rejected CVE_id is = "
                 + cve_id
                 + " and it is deleted from the database."
             )
 
+            remove_cve_doc = CVEDoc(id=cve_id)
+
+            await remove_cve_doc.delete()
+
             return cve_id
+
         else:
+
             print(
                 "The rejected CVE_id is = "
                 + cve_id
@@ -131,7 +124,6 @@ async def process_nvd(cve) -> str:
 
 async def process_cve_json(json_stream) -> None:
     """Process the provided CVEs JSONs and update the database with its contents."""
-    # await init_beanie(database=motor_client[target_db], document_models=[CVEDoc])
     data = json.load(json_stream)
     imported_cves = set()
 
@@ -144,12 +136,11 @@ async def process_cve_json(json_stream) -> None:
         nvd_cves = await task
         imported_cves.add(nvd_cves)
 
-    print("\n\n")
-
 
 async def process_urls(cve_urls, db) -> None:
     """Initialize beanie ODM and begin processing CVE URLs."""
     await init_beanie(database=motor_client[db], document_models=[CVEDoc])
+    # Async for loop that processes each of the CVE URLs individually
 
     for cve_url in cve_urls:
         # We disable the bandit blacklist for the urllib.request.urlopen() function
