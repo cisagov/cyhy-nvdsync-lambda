@@ -75,35 +75,22 @@ async def process_nvd(cve) -> str:
         """If the CVE is in the database, it needs to be deleted from the database"""
 
         if await CVEDoc.find_one(CVEDoc.id == cve_id):
-            print(
-                "The rejected CVE_id is = "
-                + cve_id
-                + " and it is deleted from the database."
-            )
-
+            print("x", end="")
             remove_cve_doc = CVEDoc(id=cve_id)
-
             await remove_cve_doc.delete()
 
             return cve_id
 
         else:
 
-            print(
-                "The rejected CVE_id is = "
-                + cve_id
-                + " and it was not added to the database."
-            )
+            print("x", end="")
             return cve_id
 
     else:
-        print("The cvss_id is = " + cve_id)
         version = "V3" if "baseMetricV3" in cve["impact"] else "V2"
-        print("The version is = " + version)
         cvss_base_score = cve["impact"]["baseMetric" + version]["cvss" + version][
             "baseScore"
         ]
-        print("The cvss_base score is " + str(cvss_base_score))
         cvss_version_temp = cve["impact"]["baseMetric" + version]["cvss" + version][
             "version"
         ]
@@ -125,7 +112,6 @@ async def process_nvd(cve) -> str:
 async def process_cve_json(json_stream) -> None:
     """Process the provided CVEs JSONs and update the database with its contents."""
     data = json.load(json_stream)
-    imported_cves = set()
 
     if data.get("CVE_data_type") != "CVE":
         raise ValueError("JSON does not look like valid NVD CVE data.")
@@ -133,8 +119,7 @@ async def process_cve_json(json_stream) -> None:
     tasks = [asyncio.create_task(process_nvd(cve)) for cve in data.get("CVE_Items", [])]
 
     for task in asyncio.as_completed(tasks):
-        nvd_cves = await task
-        imported_cves.add(nvd_cves)
+        await task
 
 
 async def process_urls(cve_urls, db) -> None:
@@ -185,8 +170,6 @@ def handler(event, context) -> None:
         old_log_level = logging.getLogger().getEffectiveLevel()
         logging.getLogger().setLevel(new_log_level)
 
-    # mongodb_uri_elements: List[Tuple[str, Optional[str]]] = []
-
     # This only runs from a CloudWatch scheduled event invocation
     trigger_source: Optional[str]
     trigger_type: Optional[str]
@@ -227,7 +210,9 @@ def handler(event, context) -> None:
         motor_client = AsyncIOMotorClient(mongodb_uri)
 
     try:
-        asyncio.run(process_urls(cve_json_urls, write_db))
+        asyncio.get_event_loop().run_until_complete(
+            process_urls(cve_json_urls, write_db)
+        )
     except Exception as err:
         logging.error("Problem encountered while processing the CVEs JSON")
         logging.exception(err)
