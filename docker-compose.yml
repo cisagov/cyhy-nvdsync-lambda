@@ -20,11 +20,7 @@ services:
     # This uses the value of the LAMBDA_TAG environment variable from
     # the invoking environment but falls back to a default value.
     image: cisagov/nvdsync_lambda:${LAMBDA_TAG:-latest}
-    depends_on:
-      - mongo
+    environment:
+      - AWS_LAMBDA_FUNCTION_TIMEOUT=900000
     ports:
       - "9000:8080"
-  mongo:
-    image: mongo:3.6.23
-    ports:
-      - "37017:27017"

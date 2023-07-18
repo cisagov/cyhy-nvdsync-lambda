@@ -8,12 +8,14 @@ from io import BytesIO
 import json
 import logging
 import os
-from typing import Optional
+from typing import List, Optional, Tuple
 import urllib.parse
 import urllib.request
 
 # Third-Party Libraries
 from beanie import Document, init_beanie
+from boto3 import client as boto3_client
+from botocore.exceptions import ClientError
 from motor.motor_asyncio import AsyncIOMotorClient
 
 default_log_level = "INFO"
@@ -25,12 +27,13 @@ NVD_FIRST_YEAR = 2002
 DEFAULT_NVD_COLLECTION = "cves"
 
 motor_client: AsyncIOMotorClient = None
+ssm_client: boto3_client = None
 
 
 class CVEDoc(Document):
     """Python class to represent a CVE Document."""
 
-    id: str  # CVE string
+    id: str
     cvss_score: Optional[float]
     cvss_version: Optional[str]
     severity: Optional[int]
@@ -98,6 +101,8 @@ async def process_nvd(cve) -> str:
         # Fill document fields with CVE data
         print(".", end="")
 
+        print("Adding CVE: ", cve_id, " to database")
+
         cve_doc = CVEDoc(
             id=cve_id, cvss_score=float(cvss_base_score), cvss_version=cvss_version_temp
         )
@@ -131,7 +136,30 @@ async def process_urls(cve_urls, db) -> None:
         # We disable the bandit blacklist for the urllib.request.urlopen() function
         # because the URL is either the defaul (safe) URL or one provided in the
         # Lambda configuration so we can assume it is safe.
-        socket = urllib.request.urlopen(cve_url)  # nosec B310
+        retries = 0
+        attempts = 10
+
+        print("Connecting to socket from: ", cve_url)
+
+        while True:
+            try:
+                socket = urllib.request.urlopen(cve_url)  # nosec B310
+                break
+            except (urllib.error.HTTPError, urllib.error.URLError) as err:
+                logging.debug(
+                    "Encountered a(n) %s exception while attempting to open socket from '%s'",
+                    type(err).__name__,
+                    cve_url,
+                )
+                retries += 1
+                await asyncio.sleep(5)
+                if retries <= attempts:
+                    logging.warning(
+                        "Performing retry %d/%d for '%s'", retries, attempts, cve_url
+                    )
+                else:
+                    raise err
+
         buf = BytesIO(socket.read())
         f = gzip.GzipFile(fileobj=buf)
         await process_cve_json(f)
@@ -142,6 +170,36 @@ def generate_urls():
     current_year = datetime.utcnow().year
     years = list(range(NVD_FIRST_YEAR, current_year + 1))
     return [DEFAULT_NVD_URL.format(**{"year": year}) for year in years]
+
+
+def get_ssm_parameter(parameter_name: str) -> str:
+    """Retrieve the value of the provided SSM Parameter Store key."""
+    try:
+        resp = ssm_client.get_parameter(Name=parameter_name, WithDecryption=True)
+        return resp["Parameter"]["Value"]
+    except ClientError:
+        logging.error("Unable to retrieve SSM Parameter Store key: %s", parameter_name)
+        raise
+
+
+def build_mongodb_uri(
+    ssm_username: str, ssm_password: str, ssm_host: str, ssm_port: str, ssm_auth_db: str
+) -> Optional[str]:
+    """Build a MongoDB database URI from the provided SSM Parameter Store keys."""
+    uri = None
+    try:
+        # Ensure the username and password are safely encoded
+        username = urllib.parse.quote_plus(get_ssm_parameter(ssm_username))
+        password = urllib.parse.quote_plus(get_ssm_parameter(ssm_password))
+        host = get_ssm_parameter(ssm_host)
+        port = get_ssm_parameter(ssm_port)
+        auth_db = get_ssm_parameter(ssm_auth_db)
+        uri = f"mongodb://{username}:{password}@{host}:{port}/{auth_db}"
+    except ClientError as client_err:
+        logging.error("Unable to create MongoDB URI.")
+        logging.exception(client_err)
+
+    return uri
 
 
 def handler(event, context) -> None:
@@ -155,7 +213,9 @@ def handler(event, context) -> None:
     :return: The result of the action.
     """
     old_log_level = None
+
     global motor_client
+    global ssm_client
 
     # Update the logging level if necessary
     new_log_level = os.environ.get("log_level", default_log_level).upper()
@@ -170,6 +230,12 @@ def handler(event, context) -> None:
         old_log_level = logging.getLogger().getEffectiveLevel()
         logging.getLogger().setLevel(new_log_level)
 
+    # Set up the SSM client if necessary
+    if ssm_client is None:
+        ssm_client = boto3_client("ssm")
+
+    mongodb_uri_elements: List[Tuple[str, Optional[str]]] = []
+
     # This only runs from a CloudWatch scheduled event invocation
     trigger_source: Optional[str]
     trigger_type: Optional[str]
@@ -183,8 +249,22 @@ def handler(event, context) -> None:
         logging.error("Invalid invocation event.")
         return
 
+    for var in [
+        "ssm_db_user",
+        "ssm_db_pass",
+        "ssm_db_host",
+        "ssm_db_port",
+        "ssm_db_authdb",
+    ]:
+        mongodb_uri_elements.append((var, os.environ.get(var)))
+
+    # Check that we have all of the required variables
+    if missing_variables := [k for k, v in mongodb_uri_elements if v is None]:
+        logging.error("Missing required variables: %s", ",".join(missing_variables))
+        return
+
     # Determine the database where the CVE data will be inserted
-    write_db = "cyhy"
+    write_db = get_ssm_parameter(os.environ.get("ssm_db_writedb", "ssm_db_authdb"))
 
     # Determine if a non-default CVEs JSON URL is being used
     nvd_urls = generate_urls()
@@ -198,12 +278,15 @@ def handler(event, context) -> None:
     # Determine if a non-default collection is being used
     db_collection = os.environ.get("target_collection")
     if db_collection is not None:
-        CVEDoc.Settings.name = db_collection
+        CVEDoc.Settings.name = get_ssm_parameter(db_collection)
 
     # We disable mypy here because the variable is typed to have Optional[str] elements
     # but we verify that there are only str elements before this point.
-    # mongodb_uri = "mongodb://{}:{}@{}:{}/{}".format(*[v for k, v in mongodb_uri_elements])  # type: ignore
-    mongodb_uri = "mongodb://mongo:27017/"
+    mongodb_uri = build_mongodb_uri(*[v for k, v in mongodb_uri_elements])  # type: ignore
+
+    if mongodb_uri is None:
+        logging.error("Unable to import KEV data.")
+        return
 
     # Set up the Motor session if necessary
     if motor_client is None:
