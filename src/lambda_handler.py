@@ -85,7 +85,6 @@ async def process_nvd(cve) -> str:
             return cve_id
 
         else:
-
             print("x", end="")
             return cve_id
 
