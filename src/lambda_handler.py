@@ -30,7 +30,7 @@ motor_client: AsyncIOMotorClient = None
 class CVEDoc(Document):
     """Python class to represent a CVE Document."""
 
-    id: str  # CVE string
+    id: str
     cvss_score: Optional[float]
     cvss_version: Optional[str]
     severity: Optional[int]
@@ -74,7 +74,7 @@ async def process_nvd(cve) -> str:
     if not any(k in cve["impact"] for k in ["baseMetricV2", "baseMetricV3"]):
         """If the CVE is in the database, it needs to be deleted from the database"""
 
-        if await CVEDoc.find_one(CVEDoc.id == cve_id):
+        if CVEDoc.find_one(CVEDoc.id == cve_id):
             print("x", end="")
             remove_cve_doc = CVEDoc(id=cve_id)
             await remove_cve_doc.delete()
@@ -97,6 +97,8 @@ async def process_nvd(cve) -> str:
 
         # Fill document fields with CVE data
         print(".", end="")
+        
+        print("Adding CVE: ", cve_id, " to database")
 
         cve_doc = CVEDoc(
             id=cve_id, cvss_score=float(cvss_base_score), cvss_version=cvss_version_temp
@@ -105,35 +107,73 @@ async def process_nvd(cve) -> str:
         if not cve_id:
             raise ValueError("JSON does not look like valid CISA CVE data.")
 
-        await cve_doc.save()
+        
+        # Gather all tasks to run concurrently
+        await asyncio.gather(*[asyncio.create_task(cve_doc.save())])
+        
         return cve_doc.id
 
 
 async def process_cve_json(json_stream) -> None:
     """Process the provided CVEs JSONs and update the database with its contents."""
     data = json.load(json_stream)
+    semaphore = asyncio.Semaphore(1000)
 
     if data.get("CVE_data_type") != "CVE":
         raise ValueError("JSON does not look like valid NVD CVE data.")
 
     tasks = [asyncio.create_task(process_nvd(cve)) for cve in data.get("CVE_Items", [])]
 
-    for task in asyncio.as_completed(tasks):
-        await task
-
+    # Run all tasks concurrently
+    async with semaphore:
+        await asyncio.gather(*tasks)
+    # for task in asyncio.as_completed(tasks):
+    #     await task
 
 async def process_urls(cve_urls, db) -> None:
     """Initialize beanie ODM and begin processing CVE URLs."""
     await init_beanie(database=motor_client[db], document_models=[CVEDoc])
     # Async for loop that processes each of the CVE URLs individually
-
+    
+    f_list = []
     for cve_url in cve_urls:
         # We disable the bandit blacklist for the urllib.request.urlopen() function
         # because the URL is either the defaul (safe) URL or one provided in the
         # Lambda configuration so we can assume it is safe.
-        socket = urllib.request.urlopen(cve_url)  # nosec B310
+        # Try to connect to the socket and if it fails, try 5 more times before
+        # giving up.
+        attempts = 0
+        retries = 10
+        
+        print("Connecting to socket from: ", cve_url)
+        
+        while True:
+            try:
+                socket = urllib.request.urlopen(cve_url)  # nosec B310
+                break
+            except (urllib.error.HTTPError, urllib.error.URLError) as err:
+                logging.debug(
+                    "Encountered a(n) %s exception while attempting to open socket from '%s'",
+                    type(err).__name__,
+                    cve_url,
+                )
+                attempts += 1
+                await asyncio.sleep(5)
+                if attempts <= retries:
+                    logging.warning(
+                        "Performing retry %d/%d for '%s'", attempts, retries, cve_url
+                    )
+                else:
+                    raise err
+                
         buf = BytesIO(socket.read())
-        f = gzip.GzipFile(fileobj=buf)
+        # append the file to the file list
+        f_list.append(gzip.GzipFile(fileobj=buf))
+    
+    # run all the files in the list concurrently
+    
+    for f in f_list:
+        print("Processing file: ", f)
         await process_cve_json(f)
 
 
@@ -194,7 +234,7 @@ def handler(event, context) -> None:
         cve_json_urls = nvd_urls
     else:
         cve_json_urls = [json_url]
-
+    
     # Determine if a non-default collection is being used
     db_collection = os.environ.get("target_collection")
     if db_collection is not None:
