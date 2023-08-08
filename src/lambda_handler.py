@@ -2,6 +2,7 @@
 
 # Standard Python Libraries
 import asyncio
+from asyncio import Semaphore
 from datetime import datetime
 import gzip
 from io import BytesIO
@@ -117,39 +118,41 @@ async def process_nvd(cve) -> str:
 async def process_cve_json(json_stream) -> None:
     """Process the provided CVEs JSONs and update the database with its contents."""
     data = json.load(json_stream)
-    semaphore = asyncio.Semaphore(1000)
 
     if data.get("CVE_data_type") != "CVE":
         raise ValueError("JSON does not look like valid NVD CVE data.")
 
     tasks = [asyncio.create_task(process_nvd(cve)) for cve in data.get("CVE_Items", [])]
+    await asyncio.gather(*tasks)
+    
+    
+async def process_file(socket) -> None:
+    """With the open socket, unzip the file and process it with process_cve_json()."""
+    # Open the file and read it into memory
+    buf = BytesIO(socket.read())
+    f = gzip.GzipFile(fileobj=buf)
+    await process_cve_json(f)
 
-    # Run all tasks concurrently
-    async with semaphore:
-        await asyncio.gather(*tasks)
-    # for task in asyncio.as_completed(tasks):
-    #     await task
 
 async def process_urls(cve_urls, db) -> None:
     """Initialize beanie ODM and begin processing CVE URLs."""
     await init_beanie(database=motor_client[db], document_models=[CVEDoc])
     # Async for loop that processes each of the CVE URLs individually
     
-    f_list = []
     for cve_url in cve_urls:
         # We disable the bandit blacklist for the urllib.request.urlopen() function
         # because the URL is either the defaul (safe) URL or one provided in the
         # Lambda configuration so we can assume it is safe.
-        # Try to connect to the socket and if it fails, try 5 more times before
+        # Try to connect to the socket and if it fails, try 10 more times before
         # giving up.
         attempts = 0
         retries = 10
         
-        print("Connecting to socket from: ", cve_url)
-        
         while True:
             try:
+                print("Before socket")
                 socket = urllib.request.urlopen(cve_url)  # nosec B310
+                print("After socket")
                 break
             except (urllib.error.HTTPError, urllib.error.URLError) as err:
                 logging.debug(
@@ -165,17 +168,9 @@ async def process_urls(cve_urls, db) -> None:
                     )
                 else:
                     raise err
-                
-        buf = BytesIO(socket.read())
-        # append the file to the file list
-        f_list.append(gzip.GzipFile(fileobj=buf))
-    
-    # run all the files in the list concurrently
-    
-    for f in f_list:
-        print("Processing file: ", f)
-        await process_cve_json(f)
-
+        
+        await process_file(socket)    
+        socket.close()
 
 def generate_urls():
     """Return the NVD URLs for each year."""
