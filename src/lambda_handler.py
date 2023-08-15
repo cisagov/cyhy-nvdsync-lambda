@@ -73,11 +73,14 @@ async def process_nvd(cve) -> str:
     """Add the provided CVE to the database and return its id."""
     # Fill fields for the CVE Documents from the given JSON files
     cve_id = cve["cve"]["CVE_data_meta"]["ID"]
+    if not cve_id:
+        raise ValueError("JSON does not look like valid CISA CVE data.")
+
     # Reject or remove CVEs that don't have baseMetricV2 or baseMetricV3 CVSS data
     if not any(k in cve["impact"] for k in ["baseMetricV2", "baseMetricV3"]):
         """If the CVE is in the database, it needs to be deleted from the database"""
 
-        if await CVEDoc.find_one(CVEDoc.id == cve_id):
+        if CVEDoc.find_one(CVEDoc.id == cve_id):
             print("x", end="")
             remove_cve_doc = CVEDoc(id=cve_id)
             await remove_cve_doc.delete()
@@ -106,24 +109,30 @@ async def process_nvd(cve) -> str:
             id=cve_id, cvss_score=float(cvss_base_score), cvss_version=cvss_version_temp
         )
 
-        if not cve_id:
-            raise ValueError("JSON does not look like valid CISA CVE data.")
+        # Gather all saving tasks to run concurrently
+        tasks = [asyncio.create_task(cve_doc.save())]
+        await asyncio.gather(*tasks)
 
-        await cve_doc.save()
         return cve_doc.id
 
 
 async def process_cve_json(json_stream) -> None:
-    """Process the provided CVEs JSONs and update the database with its contents."""
+    """Process the provided CVEs JSONs and update the database with their contents."""
     data = json.load(json_stream)
 
     if data.get("CVE_data_type") != "CVE":
         raise ValueError("JSON does not look like valid NVD CVE data.")
 
     tasks = [asyncio.create_task(process_nvd(cve)) for cve in data.get("CVE_Items", [])]
+    await asyncio.gather(*tasks)
 
-    for task in asyncio.as_completed(tasks):
-        await task
+
+async def unzip_file(socket) -> None:
+    """With the open socket, unzip the file and process it with process_cve_json()."""
+    # Open the file and read it into memory
+    buf = BytesIO(socket.read())
+    f = gzip.GzipFile(fileobj=buf)
+    await process_cve_json(f)
 
 
 async def process_urls(cve_urls, db) -> None:
@@ -133,7 +142,7 @@ async def process_urls(cve_urls, db) -> None:
 
     for cve_url in cve_urls:
         # We disable the bandit blacklist for the urllib.request.urlopen() function
-        # because the URL is either the defaul (safe) URL or one provided in the
+        # because the URL is either the default (safe) URL or one provided in the
         # Lambda configuration so we can assume it is safe.
         retries = 0
         attempts = 10
@@ -159,9 +168,8 @@ async def process_urls(cve_urls, db) -> None:
                 else:
                     raise err
 
-        buf = BytesIO(socket.read())
-        f = gzip.GzipFile(fileobj=buf)
-        await process_cve_json(f)
+        await unzip_file(socket)
+        socket.close()
 
 
 def generate_urls():
