@@ -84,15 +84,14 @@ async def process_nvd(cve) -> str:
     if not any(k in cve["impact"] for k in ["baseMetricV2", "baseMetricV3"]):
         """If the CVE is in the database, it needs to be deleted from the database"""
 
-        if await CVEDoc.find_one(CVEDoc.id == cve_id):
-            print("x", end="")
-            remove_cve_doc = CVEDoc(id=cve_id)
-            await remove_cve_doc.delete()
+        outdated_cve_doc = await CVEDoc.find_one(CVEDoc.id == cve_id)
 
+        if outdated_cve_doc:
+            print("x", end="")
+            await outdated_cve_doc.delete()
             return cve_id
 
         else:
-
             print("x", end="")
             return cve_id
 
