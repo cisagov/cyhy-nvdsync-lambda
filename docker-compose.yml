@@ -21,6 +21,7 @@ services:
     # the invoking environment but falls back to a default value.
     image: cisagov/nvdsync_lambda:${LAMBDA_TAG:-latest}
     environment:
+      # 900,000 milliseconds = 15 minutes
       - AWS_LAMBDA_FUNCTION_TIMEOUT=900000
     ports:
       - "9000:8080"
