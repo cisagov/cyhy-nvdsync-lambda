@@ -13,6 +13,7 @@ import urllib.parse
 import urllib.request
 
 # Third-Party Libraries
+import aiohttp
 from beanie import Document, init_beanie
 from boto3 import client as boto3_client
 from botocore.exceptions import ClientError
@@ -71,20 +72,27 @@ class CVEDoc(Document):
 
 async def process_nvd(cve) -> str:
     """Add the provided CVE to the database and return its id."""
-    # Fill fields for the CVE Documents from the given JSON files
-    cve_id = cve["cve"]["CVE_data_meta"]["ID"]
+    # Fill fields for the CVE documents from the given JSON files
+    try:
+        cve_id = cve["cve"]["CVE_data_meta"]["ID"]
+    except KeyError:
+        # JSON might be malformed, so we'll log what the CVE object looks like
+        # and then raise an error
+        logger.error("CVE object: %s", cve)
+        raise ValueError("JSON does not look like valid NVD CVE data.")
+    # All fields are there but 'ID' field is empty
     if not cve_id:
-        raise ValueError("JSON does not look like valid CISA CVE data.")
+        raise ValueError("CVE ID is empty.")
 
     # Reject or remove CVEs that don't have baseMetricV2 or baseMetricV3 CVSS data
     if not any(k in cve["impact"] for k in ["baseMetricV2", "baseMetricV3"]):
         """If the CVE is in the database, it needs to be deleted from the database"""
 
-        if CVEDoc.find_one(CVEDoc.id == cve_id):
-            print("x", end="")
-            remove_cve_doc = CVEDoc(id=cve_id)
-            await remove_cve_doc.delete()
+        outdated_cve_doc = await CVEDoc.find_one(CVEDoc.id == cve_id)
 
+        if outdated_cve_doc:
+            print("x", end="")
+            await outdated_cve_doc.delete()
             return cve_id
 
         else:
@@ -103,15 +111,18 @@ async def process_nvd(cve) -> str:
         # Fill document fields with CVE data
         print(".", end="")
 
-        print("Adding CVE: ", cve_id, " to database")
+        try:
+            cve_doc = CVEDoc(
+                id=cve_id,
+                cvss_score=float(cvss_base_score),
+                cvss_version=cvss_version_temp,
+                severity=None,
+            )
+        except ValueError:
+            logger.error("CVE object: %s", cve)
+            raise ValueError("JSON does not look like valid NVD CVE data.")
 
-        cve_doc = CVEDoc(
-            id=cve_id, cvss_score=float(cvss_base_score), cvss_version=cvss_version_temp
-        )
-
-        # Gather all saving tasks to run concurrently
-        tasks = [asyncio.create_task(cve_doc.save())]
-        await asyncio.gather(*tasks)
+        await cve_doc.save()
 
         return cve_doc.id
 
@@ -127,49 +138,54 @@ async def process_cve_json(json_stream) -> None:
     await asyncio.gather(*tasks)
 
 
-async def unzip_file(socket) -> None:
-    """With the open socket, unzip the file and process it with process_cve_json()."""
-    # Open the file and read it into memory
-    buf = BytesIO(socket.read())
-    f = gzip.GzipFile(fileobj=buf)
-    await process_cve_json(f)
+async def unzip_and_process(content):
+    """Unzip content and process it with process_cve_json()."""
+    with gzip.GzipFile(fileobj=BytesIO(content)) as f:
+        await process_cve_json(f)
+
+
+async def fetch_url_content(session, url):
+    """Fetch the content of the provided URL."""
+    async with session.get(url) as response:
+        return await response.read()
 
 
 async def process_urls(cve_urls, db) -> None:
-    """Initialize beanie ODM and begin processing CVE URLs."""
+    """Initialize Beanie ODM and begin processing CVE URLs."""
     await init_beanie(database=motor_client[db], document_models=[CVEDoc])
-    # Async for loop that processes each of the CVE URLs individually
 
-    for cve_url in cve_urls:
-        # We disable the bandit blacklist for the urllib.request.urlopen() function
-        # because the URL is either the default (safe) URL or one provided in the
-        # Lambda configuration so we can assume it is safe.
-        retries = 0
-        attempts = 10
+    # Create a new session for each URL to avoid throttling
+    async with aiohttp.ClientSession() as session:
+        tasks = []
 
-        print("Connecting to socket from: ", cve_url)
+        for cve_url in cve_urls:
+            attempts = 0
+            retries = 10
 
-        while True:
-            try:
-                socket = urllib.request.urlopen(cve_url)  # nosec B310
-                break
-            except (urllib.error.HTTPError, urllib.error.URLError) as err:
-                logging.debug(
-                    "Encountered a(n) %s exception while attempting to open socket from '%s'",
-                    type(err).__name__,
-                    cve_url,
-                )
-                retries += 1
-                await asyncio.sleep(5)
-                if retries <= attempts:
-                    logging.warning(
-                        "Performing retry %d/%d for '%s'", retries, attempts, cve_url
+            while True:
+                try:
+                    print("Before socket")
+                    content = await fetch_url_content(session, cve_url)
+                    tasks.append(asyncio.create_task(unzip_and_process(content)))
+                    break
+                except aiohttp.ClientError as err:
+                    logging.debug(
+                        "Encountered a(n) %s exception while attempting to fetch URL '%s'",
+                        type(err).__name__,
+                        cve_url,
                     )
-                else:
-                    raise err
-
-        await unzip_file(socket)
-        socket.close()
+                    attempts += 1
+                    await asyncio.sleep(5)
+                    if attempts <= retries:
+                        logging.warning(
+                            "Performing retry %d/%d for '%s'",
+                            attempts,
+                            retries,
+                            cve_url,
+                        )
+                    else:
+                        raise err
+    await asyncio.gather(*tasks)
 
 
 def generate_urls():
@@ -300,6 +316,9 @@ def handler(event, context) -> None:
         motor_client = AsyncIOMotorClient(mongodb_uri)
 
     try:
+        # This could be optimized to run in parallel using asyncio.gather() but the lambda handler
+        # is currently configured to run in a single-threaded environment so we should come back
+        # to this later when the lambda is configured to run in an asynchronous environment.
         asyncio.get_event_loop().run_until_complete(
             process_urls(cve_json_urls, write_db)
         )
