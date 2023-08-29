@@ -103,17 +103,16 @@ async def process_nvd(cve) -> str:
 
     else:
         version = "V3" if "baseMetricV3" in cve["impact"] else "V2"
-        cvss_base_score = cve["impact"]["baseMetric" + version]["cvss" + version][
-            "baseScore"
-        ]
-        cvss_version_temp = cve["impact"]["baseMetric" + version]["cvss" + version][
-            "version"
-        ]
-
-        # Fill document fields with CVE data
-        print(".", end="")
-
         try:
+            cvss_base_score = cve["impact"]["baseMetric" + version]["cvss" + version][
+                "baseScore"
+            ]
+            cvss_version_temp = cve["impact"]["baseMetric" + version]["cvss" + version][
+                "version"
+            ]
+
+            # Fill document fields with CVE data
+            print(".", end="")
             cve_doc = CVEDoc(
                 id=cve_id,
                 cvss_score=float(cvss_base_score),
