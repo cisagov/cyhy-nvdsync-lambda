@@ -1,4 +1,4 @@
-"""Simple AWS Lambda handler to verify functionality."""
+"""AWS Lambda handler to sync NVD data with a MongoDB."""
 
 # Standard Python Libraries
 import asyncio
