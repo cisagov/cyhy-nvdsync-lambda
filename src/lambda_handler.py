@@ -26,6 +26,8 @@ logger.setLevel(default_log_level)
 DEFAULT_NVD_URL = "https://nvd.nist.gov/feeds/json/cve/1.1/nvdcve-1.1-{year}.json.gz"
 NVD_FIRST_YEAR = 2002
 DEFAULT_NVD_COLLECTION = "cves"
+MAX_CVE_URL_RETRIES = 10
+CVE_URL_RETRY_WAIT_SEC = 5
 
 motor_client: AsyncIOMotorClient = None
 ssm_client: boto3_client = None
@@ -160,7 +162,7 @@ async def process_urls(cve_urls, db) -> None:
 
         for cve_url in cve_urls:
             attempts = 0
-            retries = 10
+            retries = MAX_CVE_URL_RETRIES
 
             while True:
                 try:
@@ -174,7 +176,7 @@ async def process_urls(cve_urls, db) -> None:
                         cve_url,
                     )
                     attempts += 1
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(CVE_URL_RETRY_WAIT_SEC)
                     if attempts <= retries:
                         logging.warning(
                             "Performing retry %d/%d for '%s'",
