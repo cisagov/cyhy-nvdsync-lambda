@@ -164,7 +164,6 @@ async def process_urls(cve_urls, db) -> None:
 
             while True:
                 try:
-                    print("Before socket")
                     content = await fetch_url_content(session, cve_url)
                     tasks.append(asyncio.create_task(unzip_and_process(content)))
                     break
