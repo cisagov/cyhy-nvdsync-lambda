@@ -23,11 +23,11 @@ default_log_level = "INFO"
 logger = logging.getLogger()
 logger.setLevel(default_log_level)
 
-DEFAULT_NVD_URL = "https://nvd.nist.gov/feeds/json/cve/1.1/nvdcve-1.1-{year}.json.gz"
-NVD_FIRST_YEAR = 2002
-DEFAULT_NVD_COLLECTION = "cves"
-MAX_CVE_URL_RETRIES = 10
 CVE_URL_RETRY_WAIT_SEC = 5
+DEFAULT_NVD_COLLECTION = "cves"
+DEFAULT_NVD_URL = "https://nvd.nist.gov/feeds/json/cve/1.1/nvdcve-1.1-{year}.json.gz"
+MAX_CVE_URL_RETRIES = 10
+NVD_FIRST_YEAR = 2002
 
 motor_client: AsyncIOMotorClient = None
 ssm_client: boto3_client = None
