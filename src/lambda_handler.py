@@ -316,9 +316,9 @@ def handler(event, context) -> None:
         motor_client = AsyncIOMotorClient(mongodb_uri)
 
     try:
-        # Using asyncio.get_event_loop() here because the subsequent runs will lead to
+        # TODO:  Using asyncio.get_event_loop() here because otherwise subsequent runs will lead to
         # a closed event loop error. This needs to be fixed in the future. An issue has been created
-        # for this.
+        # for this:
         # https://github.com/cisagov/cyhy-nvdsync-lambda/issues/4
         asyncio.get_event_loop().run_until_complete(
             process_urls(cve_json_urls, write_db)
