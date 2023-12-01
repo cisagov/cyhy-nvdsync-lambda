@@ -299,7 +299,7 @@ def handler(event, context) -> None:
         cve_json_urls = [json_url]
 
     # Determine if a non-default collection is being used
-    db_collection = os.environ.get("target_collection")
+    db_collection = os.environ.get("ssm_db_target_collection")
     if db_collection is not None:
         CVEDoc.Settings.name = get_ssm_parameter(db_collection)
 
