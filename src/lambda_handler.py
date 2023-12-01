@@ -206,21 +206,24 @@ def get_ssm_parameter(parameter_name: str) -> str:
 
 
 def build_mongodb_uri(
-    ssm_username: str, ssm_password: str, ssm_host: str, ssm_port: str, ssm_auth_db: str
+    ssm_username: str, ssm_password: str, db_host: str, db_port: str, ssm_auth_db: str
 ) -> Optional[str]:
     """Build a MongoDB database URI from the provided SSM Parameter Store keys."""
     uri = None
     try:
+        # Ensure the database host and port were provided
+        if not db_host:
+            raise ValueError("The database hostname must be provided.")
+        if not db_port:
+            raise ValueError("The database port must be provided.")
         # Ensure the username and password are safely encoded
         username = urllib.parse.quote_plus(get_ssm_parameter(ssm_username))
         password = urllib.parse.quote_plus(get_ssm_parameter(ssm_password))
-        host = get_ssm_parameter(ssm_host)
-        port = get_ssm_parameter(ssm_port)
         auth_db = get_ssm_parameter(ssm_auth_db)
         uri = f"mongodb://{username}:{password}@{host}:{port}/{auth_db}"
-    except ClientError as client_err:
+    except (ClientError, ValueError) as err:
         logging.error("Unable to create MongoDB URI.")
-        logging.exception(client_err)
+        logging.exception(err)
 
     return uri
 
