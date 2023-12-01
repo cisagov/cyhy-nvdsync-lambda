@@ -282,7 +282,7 @@ def handler(event, context) -> None:
         "db_port",
         "ssm_db_authdb",
     ]:
-        mongodb_uri_elements.append((var, os.environ.get(var)))
+        mongodb_uri_elements.append((var, os.environ.get(var, "")))
 
     # Check that we have all of the required variables
     if missing_variables := [k for k, v in mongodb_uri_elements if v is None]:
