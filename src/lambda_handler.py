@@ -275,8 +275,8 @@ def handler(event, context) -> None:
     for var in [
         "ssm_db_user",
         "ssm_db_pass",
-        "ssm_db_host",
-        "ssm_db_port",
+        "db_host",
+        "db_port",
         "ssm_db_authdb",
     ]:
         mongodb_uri_elements.append((var, os.environ.get(var)))
