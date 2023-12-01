@@ -220,7 +220,7 @@ def build_mongodb_uri(
         username = urllib.parse.quote_plus(get_ssm_parameter(ssm_username))
         password = urllib.parse.quote_plus(get_ssm_parameter(ssm_password))
         auth_db = get_ssm_parameter(ssm_auth_db)
-        uri = f"mongodb://{username}:{password}@{host}:{port}/{auth_db}"
+        uri = f"mongodb://{username}:{password}@{db_host}:{db_port}/{auth_db}"
     except (ClientError, ValueError) as err:
         logging.error("Unable to create MongoDB URI.")
         logging.exception(err)
