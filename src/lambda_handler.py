@@ -290,7 +290,9 @@ def handler(event, context) -> None:
         return
 
     # Determine the database where the CVE data will be inserted
-    write_db = get_ssm_parameter(os.environ.get("ssm_db_writedb", os.environ.get("ssm_db_authdb", "")))
+    write_db = get_ssm_parameter(
+        os.environ.get("ssm_db_writedb", os.environ.get("ssm_db_authdb", ""))
+    )
 
     # Determine if a non-default CVEs JSON URL is being used
     nvd_urls = generate_urls()
