@@ -262,15 +262,17 @@ def handler(event, context) -> None:
 
     mongodb_uri_elements: List[Tuple[str, Optional[str]]] = []
 
-    # This only runs from a CloudWatch scheduled event invocation
+    # This Lambda will only run under the following invocations:
+    # - CloudWatch scheduled event
+    # - Terraform Lambda invocation creation (this is a manual input)
     trigger_source: Optional[str]
     trigger_type: Optional[str]
     if (
         (trigger_source := event.get("source")) is None
-        or trigger_source != "aws.events"
-    ) or (
-        (trigger_type := event.get("detail-type")) is None
-        or trigger_type != "Scheduled Event"
+        or (trigger_type := event.get("detail-type")) is None
+        or trigger_source not in ["aws.events", "terraform"]
+        or (trigger_source == "aws.event" and trigger_type != "Scheduled Event")
+        or (trigger_source == "terraform" and trigger_type != "Invocation Created")
     ):
         logging.error("Invalid invocation event.")
         return
